@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ChimeraCoder/anaconda"
+	"github.com/garyburd/go-oauth/oauth"
 	"github.com/gorilla/mux"
 )
 
@@ -18,9 +20,10 @@ var conf config
 var configFile string
 var tomatter = make(chan string)
 var Nicklist = make(map[string]string)
+var api *anaconda.TwitterApi
 
 type mattermessage struct {
-	Text string `json:"name"`
+	Text string `json:"text"`
 }
 
 func init() {
@@ -34,33 +37,35 @@ func main() {
 
 	anaconda.SetConsumerKey(conf.ConsumerKey)
 	anaconda.SetConsumerSecret(conf.ConsumerSecret)
-	u, tmpCred, err := anaconda.AuthorizationURL("oob")
-	if err != nil {
-		log.Fatal(err)
+
+	var cred *oauth.Credentials
+	if conf.AccessToken == "" {
+		u, tmpCred, err := anaconda.AuthorizationURL("oob")
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Println(u)
+
+		var pin string
+		fmt.Scanln(&pin)
+
+		cred, _, err = anaconda.GetCredentials(tmpCred, pin)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		conf.AccessToken = cred.Token
+		conf.AccessTokenSecret = cred.Secret
+		conf.save(configFile)
 	}
-	log.Println(u)
 
-	var pin string
-	fmt.Scanln(&pin)
-
-	cred, _, err := anaconda.GetCredentials(tmpCred, pin)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	api := anaconda.NewTwitterApi(cred.Token, cred.Secret)
+	api = anaconda.NewTwitterApi(conf.AccessToken, conf.AccessTokenSecret)
 	api.SetLogger(anaconda.BasicLogger)
-
-	res, err := api.GetTweet(634839419317456896, nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Println(res)
 
 	r := mux.NewRouter()
 	r = r.StrictSlash(true)
 	r.HandleFunc("/twitter", twitterhandler)
-
+	log.Println("Starting Server")
 	log.Fatal(http.ListenAndServe("127.0.0.1:8000", r))
 
 }
@@ -117,8 +122,21 @@ func twitterhandler(w http.ResponseWriter, r *http.Request) {
 	text = strings.TrimPrefix(text, "!dm ")
 	short := getshortnick(nick)
 	tweet := text + short
-	if (utf8.RuneCountInString(tweet) > 140) || (trigger == "!tweet") {
 
+	var m mattermessage
+	if (utf8.RuneCountInString(tweet) > 140) && (trigger == "!tweet") {
+		log.Println("Tweet too long", utf8.RuneCountInString(tweet))
+		log.Println(tweet)
+		m.Text = "Tweet longer than 140 letters"
+		b, err := json.MarshalIndent(&m, "", "    ")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Println(err)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(b)
 		return
 	}
 
@@ -129,10 +147,27 @@ func twitterhandler(w http.ResponseWriter, r *http.Request) {
 		err = senddm(tweet)
 	}
 
+	if err != nil {
+		m.Text = "Error: " + err.Error()
+	}
+	m.Text = "Tweet successfully send"
+	b, err := json.MarshalIndent(&m, "", "    ")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Println(err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(b)
+	return
+
 }
 
 func sendtweet(tweet string) error {
-	return nil
+	log.Println("Tweet", tweet)
+	_, err := api.PostTweet(tweet, nil)
+	return err
 }
 
 func senddm(tweet string) error {
